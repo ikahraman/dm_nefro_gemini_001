@@ -1,255 +1,227 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+import joblib
+from scipy.stats import linregress
 
-# -----------------------------------------------------------------------------
-# 1. SAYFA AYARLARI
-# -----------------------------------------------------------------------------
+# Sayfa Ayarları
 st.set_page_config(
-    page_title="T1DM & Nefropati Analiz Paneli",
-    layout="wide",
-    page_icon="🧬",
-    initial_sidebar_state="expanded"
+    page_title="Diyabetik Nefropati AI", 
+    page_icon="🛡️", 
+    layout="wide"
 )
 
-# -----------------------------------------------------------------------------
-# 2. VERİ YÜKLEME VE İŞLEME (ETL)
-# -----------------------------------------------------------------------------
-@st.cache_data
-def load_data():
-    # CSV dosyasını yükle
+# --- 1. MODEL VE SCALER YÜKLEME ---
+@st.cache_resource
+def load_assets():
+    # train_and_save.py ile oluşturduğun dosyalar
     try:
-        df = pd.read_csv('type_1_and_renal_damage.csv')
-    except FileNotFoundError:
-        st.error("❌ 'type_1_and_renal_damage.csv' dosyası bulunamadı! Lütfen dosyayı proje klasörüne ekleyin.")
-        st.stop()
-        
-    # Tarih formatını düzelt
-    df['charttime'] = pd.to_datetime(df['charttime'])
-    
-    # Sayısal değerleri garantiye al (Metin karışmışsa NaN yap)
-    df['valuenum'] = pd.to_numeric(df['valuenum'], errors='coerce')
-    
-    # Yaş Sütununu Otomatik Bul (SQL sorgusuna göre değişebilir)
-    age_col = 'age'
-    if 'real_age' in df.columns:
-        age_col = 'real_age'
-    elif 'age_at_test' in df.columns:
-        age_col = 'age_at_test'
-    
-    # --- eGFR HESAPLAMA (CKD-EPI 2021) - GÜVENLİ VERSİYON ---
-    def calc_egfr(row):
-        # Sadece Kreatinin satırları için hesapla
-        if row['lab_name'] == 'Creatinine':
-            scr = row['valuenum']
-            
-            # [FIX] HATA KORUMASI: 0 veya negatif değerleri engelle
-            if pd.isna(scr) or scr <= 0:
-                return np.nan
-            
-            current_age = row[age_col]
-            is_female = 1 if row['gender'] == 'F' else 0
-            
-            if is_female:
-                k = 0.7; alpha = -0.329; factor = 1.018
-            else:
-                k = 0.9; alpha = -0.411; factor = 1
-            
-            # Matematiksel Formül (Try-Except ile ekstra koruma)
-            try:
-                egfr = 142 * (min(scr/k, 1)**alpha) * (max(scr/k, 1)**-1.200) * (0.9938**current_age) * factor
-            except Exception:
-                return np.nan
-                
-            return egfr
-        return np.nan
+        model = load_model('model_final.keras') 
+        scaler = joblib.load('scaler_final.pkl')
+        return model, scaler
+    except Exception as e:
+        return None, None
 
-    # Fonksiyonu uygula
-    df['eGFR'] = df.apply(calc_egfr, axis=1)
-    
-    return df, age_col
+model, scaler = load_assets()
 
-# Veriyi Yükle
-df, age_col_name = load_data()
-
-# -----------------------------------------------------------------------------
-# 3. SIDEBAR - HASTA SEÇİMİ VE ÖZET
-# -----------------------------------------------------------------------------
-st.sidebar.title("🔍 Hasta Gezgini")
-
-# Hasta Listesi
-unique_patients = df['subject_id'].unique()
-st.sidebar.info(f"**Yüklü Hasta Sayısı:** {len(unique_patients)}")
-
-# Arama Kutusu
-selected_patient_id = st.sidebar.selectbox("Hasta ID Seçin:", unique_patients)
-
-# Seçilen Hastanın Verisini Filtrele
-p_df = df[df['subject_id'] == selected_patient_id].sort_values('charttime')
-
-# Hastanın Demografik Bilgisi (İlk satırdan al)
-if not p_df.empty:
-    p_gender = p_df['gender'].iloc[0]
-    p_age = p_df[age_col_name].iloc[0]
-else:
-    st.error("Bu hasta için veri bulunamadı.")
+# Eğer dosyalar yoksa kullanıcıyı uyar
+if model is None or scaler is None:
+    st.error("""
+    🚨 **Kritik Hata:** Model dosyaları bulunamadı! 
+    Lütfen önce `train_and_save.py` dosyasını çalıştırarak `model_final.keras` ve `scaler_final.pkl` dosyalarını oluşturun.
+    """)
     st.stop()
 
-# -----------------------------------------------------------------------------
-# 4. ANA EKRAN - HASTA DETAYLARI
-# -----------------------------------------------------------------------------
-st.title(f"🩺 Hasta Kartı: {selected_patient_id}")
-
-# Üst Bilgi Kartları
-col1, col2, col3, col4 = st.columns(4)
-
-# Son eGFR'yi bul
-egfr_history = p_df.dropna(subset=['eGFR'])
-if not egfr_history.empty:
-    last_egfr = egfr_history['eGFR'].iloc[-1]
-    col1.metric("Son eGFR", f"{last_egfr:.1f}", delta="Riskli" if last_egfr < 60 else "Normal", delta_color="normal" if last_egfr > 60 else "inverse")
-else:
-    col1.metric("Son eGFR", "Hesaplanamadı")
-
-# Son HbA1c
-hba1c_data = p_df[p_df['lab_name'] == 'HbA1c']
-if not hba1c_data.empty:
-    val = hba1c_data['valuenum'].iloc[-1]
-    col2.metric("Son HbA1c", f"%{val}", delta="Yüksek" if val > 7 else "İyi", delta_color="inverse")
-else:
-    col2.metric("Son HbA1c", "-")
-
-col3.metric("Yaş / Cinsiyet", f"{int(p_age)} / {p_gender}")
-col4.metric("Toplam Veri Noktası", len(p_df))
-
-st.divider()
-
-# -----------------------------------------------------------------------------
-# 5. GRAFİKLER (ZAMAN SERİLERİ)
-# -----------------------------------------------------------------------------
-
-tab1, tab2, tab3 = st.tabs(["📈 Ana Trendler", "🧪 Geniş Panel", "📋 Ham Veri"])
-
-with tab1:
-    col_g1, col_g2 = st.columns(2)
+# --- 2. HESAPLAMA MOTORU (FEATURE ENGINEERING) ---
+def calculate_features(age, glucose_history, egfr_history, hba1c):
+    """
+    Kullanıcıdan alınan ham listeleri, modelin anladığı matematiksel özelliklere çevirir.
+    """
+    gl_series = pd.Series(glucose_history)
+    egfr_series = pd.Series(egfr_history)
     
-    with col_g1:
-        st.subheader("Böbrek Fonksiyonu (eGFR)")
-        if not egfr_history.empty:
-            fig_egfr = px.line(egfr_history, x='charttime', y='eGFR', markers=True, 
-                               title="eGFR Seyri (Böbrek Süzme Hızı)",
-                               labels={'eGFR': 'eGFR (ml/min/1.73m²)'})
-            # Kritik Eşik
-            fig_egfr.add_hline(y=60, line_dash="dash", line_color="red", annotation_text="Yetmezlik Sınırı (60)")
-            fig_egfr.update_traces(line_color='#2ca02c') # Yeşil
-            st.plotly_chart(fig_egfr, use_container_width=True)
-        else:
-            st.warning("Bu hasta için yeterli Kreatinin verisi yok, eGFR hesaplanamadı.")
-            
-    with col_g2:
-        st.subheader("Glisemik Kontrol (Glikoz)")
-        glu_data = p_df[p_df['lab_name'] == 'Glucose']
-        if not glu_data.empty:
-            # Glikoz CV Hesabı
-            g_mean = glu_data['valuenum'].mean()
-            g_std = glu_data['valuenum'].std()
-            g_cv = g_std / g_mean if g_mean > 0 else 0
-            
-            st.caption(f"**Glikoz Dalgalanması (CV): {g_cv:.2f}** (0.36 üzeri yüksek risktir)")
-            
-            fig_glu = px.line(glu_data, x='charttime', y='valuenum', markers=True,
-                              title="Kan Şekeri Seyri",
-                              labels={'valuenum': 'Glikoz (mg/dL)'})
-            fig_glu.add_hline(y=180, line_dash="dash", line_color="orange", annotation_text="Hiperglisemi")
-            fig_glu.add_hline(y=70, line_dash="dash", line_color="red", annotation_text="Hipoglisemi")
-            st.plotly_chart(fig_glu, use_container_width=True)
-        else:
-            st.warning("Glikoz verisi yok.")
-
-with tab2:
-    st.markdown("### 🔬 Detaylı Biyobelirteçler")
-    # Kullanıcının seçebileceği lab testleri
-    available_labs = p_df['lab_name'].unique()
-    # Varsayılan olarak ilginç olanları seç (Veride varsa)
-    default_candidates = ['Potassium', 'Hemoglobin', 'Albumin', 'BUN', 'Cholesterol_Total']
-    default_labs = [l for l in default_candidates if l in available_labs]
+    # 1. Temel İstatistikler
+    current_glucose = gl_series.iloc[-1]
+    gl_mean = gl_series.mean()
+    gl_std = gl_series.std() if len(gl_series) > 1 else 0
     
-    selected_labs = st.multiselect("Grafiğe Eklenecek Testler:", available_labs, default=default_labs)
+    # 2. Türetilmiş Biyobelirteçler
+    # CV: Standart Sapma / Ortalama (Sıfıra bölünmeyi önlemek için +1e-9)
+    glucose_cv = gl_std / (gl_mean + 1e-9)
     
-    if selected_labs:
-        subset = p_df[p_df['lab_name'].isin(selected_labs)]
-        fig_multi = px.scatter(subset, x='charttime', y='valuenum', color='lab_name', 
-                               title="Karşılaştırmalı Laboratuvar Değerleri",
-                               facet_col='lab_name', facet_col_wrap=2, # Her test için ayrı küçük grafik
-                               height=600)
-        fig_multi.update_yaxes(matches=None) # Y eksenlerini serbest bırak (Birimler farklı çünkü)
-        st.plotly_chart(fig_multi, use_container_width=True)
+    # Hyper Load: 180 üzerindeki ölçümlerin oranı
+    hyper_load = (gl_series > 180).astype(int).mean()
+    
+    # HbA1c Dolgu (Varsa kullan, yoksa tahmin et)
+    if hba1c is None or hba1c == 0:
+        final_hba1c = (gl_mean + 46.7) / 28.7
     else:
-        st.info("Lütfen yukarıdan bir test seçin.")
-
-with tab3:
-    st.subheader("📋 Hastaya Ait Ham Veri")
-    # Pivot Table ile okunabilir hale getir
-    try:
-        # Pivot yaparken duplicate charttime'ları yönetmek için 'first' veya 'mean' kullanılır
-        pivot_df = p_df.pivot_table(index='charttime', columns='lab_name', values='valuenum', aggfunc='first')
-        st.dataframe(pivot_df.sort_index(ascending=False), use_container_width=True)
-    except Exception as e:
-        st.dataframe(p_df) # Pivot hata verirse düz tablo göster
-
-# -----------------------------------------------------------------------------
-# 6. KOHORT ANALİZİ (TÜM HASTALAR) - ALT BÖLÜM
-# -----------------------------------------------------------------------------
-st.markdown("---")
-st.header("🌍 Büyük Resim: Tüm Kohort Analizi")
-
-if st.checkbox("Tüm Veri Setini Analiz Et (Biraz zaman alabilir)"):
+        final_hba1c = hba1c
+        
+    # Etkileşimler
+    age_x_glucose = age * gl_mean
+    toxic_comb = glucose_cv * hyper_load
     
-    with st.spinner("Hastaların verileri özetleniyor..."):
-        # Her hasta için özet istatistik çıkaralım
-        
-        # 1. Glikoz İstatistikleri
-        g_stats = df[df['lab_name'] == 'Glucose'].groupby('subject_id')['valuenum'].agg(['mean', 'std']).reset_index()
-        g_stats['glucose_cv'] = g_stats['std'] / g_stats['mean']
-        
-        # 2. En Kötü eGFR (Minimum)
-        # eGFR zaten hesaplanmıştı df['eGFR']
-        k_stats = df.groupby('subject_id')['eGFR'].min().reset_index().rename(columns={'eGFR': 'min_egfr'})
-        
-        # 3. Birleştir
-        cohort_summary = pd.merge(g_stats, k_stats, on='subject_id')
-        
-        # 4. Risk Etiketlemesi
-        cohort_summary['Risk_Grubu'] = cohort_summary.apply(
-            lambda x: 'Yüksek Risk (eGFR<60)' if x['min_egfr'] < 60 else 'Düşük Risk', axis=1
-        )
-        
-        # GRAFİK
-        c1, c2 = st.columns([2, 1])
-        
-        with c1:
-            st.subheader("Glikoz Kararsızlığı vs. En Kötü Böbrek Değeri")
-            fig_scat = px.scatter(cohort_summary, x='glucose_cv', y='min_egfr',
-                                  color='Risk_Grubu',
-                                  color_discrete_map={'Yüksek Risk (eGFR<60)': 'red', 'Düşük Risk': 'green'},
-                                  hover_data=['subject_id'],
-                                  title="CV (Dalgalanma) Arttıkça eGFR Düşüyor mu?",
-                                  labels={'glucose_cv': 'Glikoz CV (Dalgalanma)', 'min_egfr': 'Minimum eGFR'})
+    # 3. Trend Analizi (Slope)
+    if len(egfr_series) > 1:
+        # X ekseni: Zaman (0, 1, 2...), Y ekseni: eGFR
+        slope, _, _, _, _ = linregress(range(len(egfr_series)), egfr_series)
+    else:
+        slope = 0.0
+    egfr_trend = slope 
+
+    # --- ÖNEMLİ: EĞİTİMDEKİ SIRALAMA İLE AYNISI ---
+    # ['age_at_test', 'Glucose', 'Glucose_CV', 'Hyper_Load', 'HbA1c_Final', 'Age_x_Glucose', 'Toxic_Combination', 'eGFR_Trend_Rolling']
+    
+    feature_vector = np.array([
+        age, 
+        current_glucose, 
+        glucose_cv, 
+        hyper_load, 
+        final_hba1c, 
+        age_x_glucose, 
+        toxic_comb, 
+        egfr_trend
+    ]).reshape(1, -1)
+    
+    return feature_vector, glucose_cv, egfr_trend
+
+# --- 3. ARAYÜZ TASARIMI ---
+st.title("🛡️ Diyabetik Nefropati - Erken Tespit Sistemi")
+st.markdown("""
+Bu sistem, **Tip 1 Diyabet** hastalarında böbrek hasarını, klinik belirtiler başlamadan önce öngörmek için 
+**LSTM (Derin Öğrenme)** teknolojisini kullanır. Anlık şekerden ziyade **dalgalanmaya (CV)** ve **düşüş hızına (Trend)** odaklanır.
+""")
+
+# Yan Panel (Geliştirici Modu)
+with st.sidebar:
+    st.header("⚙️ Ayarlar")
+    debug_mode = st.checkbox("Mühendislik Detaylarını Göster", value=False)
+    st.info("Bu mod, modelin arka planda gördüğü sayısal matrisleri gösterir.")
+
+col1, col2 = st.columns([1, 1.5])
+
+with col1:
+    st.subheader("📝 Hasta Verileri")
+    
+    age = st.number_input("Yaş", min_value=10, max_value=90, value=55)
+    hba1c = st.number_input("Son HbA1c (%)", min_value=4.0, max_value=15.0, value=8.5, step=0.1)
+    
+    st.markdown("---")
+    st.caption("Verileri virgülle ayırarak giriniz (Örn: 120, 240, 80...)")
+    
+    # Varsayılan değerler: Yüksek Dalgalanma Senaryosu
+    gl_input = st.text_input("Glukoz Geçmişi (Son 5 Ölçüm)", "70, 300, 80, 250, 90")
+    
+    # Varsayılan değerler: Düşen Trend Senaryosu
+    egfr_input = st.text_input("eGFR Geçmişi (Son 3-5 Ziyaret)", "90, 80, 70")
+    
+    btn_predict = st.button("Risk Analizi Yap", type="primary", use_container_width=True)
+
+with col2:
+    if btn_predict:
+        try:
+            # Girdileri listeye çevir
+            gl_history = [float(x.strip()) for x in gl_input.split(',')]
+            egfr_history = [float(x.strip()) for x in egfr_input.split(',')]
             
-            # Kritik Bölgeyi İşaretle
-            fig_scat.add_hline(y=60, line_dash="dash", line_color="gray")
-            fig_scat.add_vline(x=0.35, line_dash="dash", line_color="gray")
-            st.plotly_chart(fig_scat, use_container_width=True)
-            
-        with c2:
-            st.write("""
-            **Grafik Yorumu:**
-            * **X Ekseni:** Şekerin ne kadar dalgalı olduğu. Sağa gittikçe dalgalanma artar.
-            * **Y Ekseni:** Böbrek sağlığı. Aşağı gittikçe böbrek kötüleşir.
-            * **Hipotez:** Kırmızı noktaların (Hasta böbrekler) grafiğin sağ tarafında (Yüksek CV) yoğunlaşmasını bekliyoruz.
-            """)
-            riskli_sayi = len(cohort_summary[cohort_summary['min_egfr'] < 60])
-            st.metric("Riskli Hasta Sayısı", riskli_sayi)
-            st.metric("Toplam Analiz Edilen", len(cohort_summary))
+            if len(gl_history) < 3:
+                st.warning("⚠️ Doğru trend analizi için en az 3 glukoz değeri girin.")
+            else:
+                # ---------------------------------------------------------
+                # ADIM A: Özellik Hesaplama
+                # ---------------------------------------------------------
+                raw_features, calc_cv, calc_slope = calculate_features(age, gl_history, egfr_history, hba1c)
+                
+                # ---------------------------------------------------------
+                # ADIM B: Ölçekleme (Standard Scaler)
+                # ---------------------------------------------------------
+                scaled_features = scaler.transform(raw_features)
+                
+                # ---------------------------------------------------------
+                # ADIM C: Replikasyon (Statik Film Tekniği)
+                # Tek bir satırı 10 kez kopyalayarak (1, 10, 8) boyutuna getiriyoruz.
+                # Böylece LSTM, "Padding" (boşluk) yüzünden kararsız kalmıyor.
+                # ---------------------------------------------------------
+                
+                # (1, 8) -> (1, 1, 8)
+                seq_input = scaled_features.reshape(1, 1, 8)
+                
+                # (1, 1, 8) -> (1, 10, 8)
+                model_input = np.tile(seq_input, (1, 10, 1))
+                
+                # ---------------------------------------------------------
+                # ADIM D: Tahmin
+                # ---------------------------------------------------------
+                prediction_prob = model.predict(model_input)[0][0]
+                prediction_percent = prediction_prob * 100
+                
+                # ---------------------------------------------------------
+                # SONUÇ GÖSTERİMİ
+                # ---------------------------------------------------------
+                st.subheader("📊 Analiz Sonucu")
+                
+                if prediction_percent < 40:
+                    status_color = "green"
+                    status_text = "DÜŞÜK RİSK"
+                    alert_type = st.success
+                elif prediction_percent < 70:
+                    status_color = "orange"
+                    status_text = "ORTA RİSK"
+                    alert_type = st.warning
+                else:
+                    status_color = "red"
+                    status_text = "YÜKSEK RİSK"
+                    alert_type = st.error
+                
+                alert_type(f"**{status_text}:** %{prediction_percent:.1f}")
+                st.progress(int(prediction_percent))
+                
+                # Explainable AI (Açıklama)
+                st.markdown("### 🔍 Model Neden Bu Kararı Verdi?")
+                c1, c2, c3 = st.columns(3)
+                
+                c1.metric(
+                    label="Glukoz Dalgalanması (CV)", 
+                    value=f"{calc_cv:.2f}",
+                    delta="Yüksek Risk" if calc_cv > 0.3 else "Normal",
+                    delta_color="inverse",
+                    help="0.30'un üzerindeki değerler yüksek kararsızlık (risk) işaretidir."
+                )
+                
+                c2.metric(
+                    label="eGFR Trendi (Slope)", 
+                    value=f"{calc_slope:.2f}",
+                    delta="Düşüş Var" if calc_slope < -2 else "Stabil",
+                    delta_color="normal" if calc_slope >= -2 else "inverse",
+                    help="Negatif değerler böbrek fonksiyonundaki düşüş hızını gösterir."
+                )
+                
+                c3.metric(label="Son Glukoz", value=f"{gl_history[-1]} mg/dL")
+                
+                # DEBUG EKRANI
+                if debug_mode:
+                    st.divider()
+                    st.warning("🛠️ MÜHENDİSLİK DETAYLARI (DEBUG)")
+                    st.write("**Ham Vektör (Raw Features):**", raw_features)
+                    st.write("**Ölçeklenmiş Vektör (Scaled Input):**", scaled_features)
+                    st.write(f"**Model Girdisi Şekli:** {model_input.shape}")
+                    st.write(f"**Ham Tahmin Olasılığı:** {prediction_prob:.6f}")
+
+        except Exception as e:
+            st.error(f"Bir hata oluştu: {e}")
+            st.info("Lütfen sayıları virgülle ayırarak (Örn: 100, 120) girdiğinizden emin olun.")
+
+    else:
+        # Başlangıçta boş durmasın diye bilgilendirme
+        st.info("Sol taraftan verileri girip 'Risk Analizi Yap' butonuna basın.")
+        st.markdown("#### 📉 Sistem Nasıl Çalışıyor?")
+        st.markdown("""
+        1. **Veri Girişi:** Hastanın son glukoz ve eGFR ölçümleri alınır.
+        2. **Sinyal İşleme:** Sistem, glukozdaki **dalgalanmayı (CV)** ve böbrekteki **düşüş hızını (Slope)** hesaplar.
+        3. **Yapay Zeka:** Bidirectional LSTM modeli, bu örüntüleri 450.000+ hasta verisiyle kıyaslar.
+        4. **Sonuç:** Kişiye özel risk skoru üretilir.
+        """)
