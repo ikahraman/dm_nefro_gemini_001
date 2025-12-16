@@ -15,24 +15,36 @@ st.set_page_config(
 )
 
 # --- 1. MODEL VE SCALER YÜKLEME ---
+import os
+import streamlit as st
+# Diğer importlar... (joblib, tensorflow.keras.models vs.)
+
 @st.cache_resource
 def load_assets():
+    # ÖNCE DOSYALAR ORADA MI DİYE KONTROL EDELİM
+    st.write("📂 Çalışma Dizini:", os.getcwd())
+    st.write("📄 Dosya Listesi:", os.listdir('.'))
+
     # train_and_save.py ile oluşturduğun dosyalar
     try:
-        model = load_model('model_final.keras') 
+        # Önce kütüphanelerin yüklü olup olmadığını test edelim
+        import tensorflow as tf
+        import joblib
+        
+        # Dosyaları yüklemeyi dene
+        model = tf.keras.models.load_model('model_final.keras') 
         scaler = joblib.load('scaler_final.pkl')
         return model, scaler
+
     except Exception as e:
+        # HATAYI YUTMA, EKRANA YAZ!
+        st.error(f"💥 HATA DETAYI: {e}")
         return None, None
 
 model, scaler = load_assets()
 
-# Eğer dosyalar yoksa kullanıcıyı uyar
-if model is None or scaler is None:
-    st.error("""
-    🚨 **Kritik Hata:** Model dosyaları bulunamadı! 
-    Lütfen önce `train_and_save.py` dosyasını çalıştırarak `model_final.keras` ve `scaler_final.pkl` dosyalarını oluşturun.
-    """)
+# Eğer model yüklenemediyse dur
+if model is None:
     st.stop()
 
 # --- 2. HESAPLAMA MOTORU (FEATURE ENGINEERING) ---
