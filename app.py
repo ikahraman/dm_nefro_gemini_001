@@ -22,8 +22,8 @@ import streamlit as st
 @st.cache_resource
 def load_assets():
     # ÖNCE DOSYALAR ORADA MI DİYE KONTROL EDELİM
-    st.write("📂 Çalışma Dizini:", os.getcwd())
-    st.write("📄 Dosya Listesi:", os.listdir('.'))
+    # st.write("📂 Çalışma Dizini:", os.getcwd())
+    # st.write("📄 Dosya Listesi:", os.listdir('.'))
 
     # train_and_save.py ile oluşturduğun dosyalar
     try:
